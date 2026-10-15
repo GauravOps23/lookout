@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lookout</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="shell">
+    <aside id="bar" hidden>
+      <a class="brand" href="#/"><span class="lamp" aria-hidden="true"></span>Lookout</a>
+      <nav id="nav" aria-label="Main"></nav>
+      <div class="me">
+        <span id="who"></span>
+        <button id="logout" type="button" class="ghost">Sign out</button>
+      </div>
+    </aside>
+    <main id="app"><p class="mute pad">Loading…</p></main>
+  </div>
+  <div id="toasts" role="status" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

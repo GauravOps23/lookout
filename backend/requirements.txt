@@ -1,0 +1,20 @@
+# Runtime dependencies (Python 3.11+; developed and tested on 3.14)
+fastapi==0.143.1
+uvicorn[standard]==0.54.0
+SQLAlchemy==2.1.4
+alembic==1.20.0
+psycopg[binary]==3.3.6
+pydantic==2.14.1
+pydantic-settings==2.16.0
+argon2-cffi==25.1.0
+cryptography==50.0.2
+python-multipart==0.0.32
+
+# M2: connectors, views, scheduler
+oracledb==26.0.1        # Oracle thin mode, no client install
+paramiko==5.0.0         # SSH
+httpx==0.28.1           # API resources
+defusedxml==0.7.1       # safe SOAP/XML parsing
+sqlglot==30.23.0        # SELECT-only SQL validation
+jsonpath-ng==1.10.1     # API response mapping
+APScheduler==3.11.3     # status checks, cron views, retention

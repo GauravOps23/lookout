@@ -1,0 +1,53 @@
+# Stack: PostgreSQL, one-shot migration, API, scheduler. The web (nginx/SPA) service arrives with the frontend.
+# Put TLS in front of `app` (nginx/caddy): the session cookie is Secure and will not work over plain http.
+# NOT YET RUN: written from the spec, never started in this environment.
+x-app: &app
+  build: ../backend
+  environment:
+    DATABASE_URL: postgresql+psycopg://panel:${DB_PASSWORD}@db:5432/panel
+    MASTER_KEY_FILE: /run/secrets/master_key
+    BACKUP_DIR: /backups
+    ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-[]}
+  secrets: [master_key]
+
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: panel
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      POSTGRES_DB: panel
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U panel"]
+      interval: 5s
+      retries: 10
+
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db: {condition: service_healthy}
+    restart: "no"
+
+  app:
+    <<: *app
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    volumes: [backups:/backups]
+    ports: ["127.0.0.1:8000:8000"]
+
+  # Exactly one instance: status checks, cron views and retention. Never scale this service.
+  scheduler:
+    <<: *app
+    command: ["python", "-m", "app.scheduler"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+secrets:
+  master_key:
+    file: ./master_key.txt   # generate: python -m app.cli gen-master-key > deploy/master_key.txt
+
+volumes:
+  pgdata:
+  backups:

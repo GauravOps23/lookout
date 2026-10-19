@@ -35,7 +35,7 @@ class ViewCreate(Strict):
     name: str = Field(min_length=1, max_length=128)
     description: str = ""
     config: dict[str, Any]
-    source_resource_ids: list[uuid.UUID] = Field(min_length=1, max_length=200)
+    source_resource_ids: list[uuid.UUID] = Field([], max_length=200)  # empty for trend views
     renderer: str | None = None
     schedule_cron: str | None = None
     cache_ttl_s: int = Field(60, ge=0, le=86400)
@@ -46,7 +46,7 @@ class ViewPatch(Strict):
     name: str | None = Field(None, min_length=1, max_length=128)
     description: str | None = None
     config: dict[str, Any] | None = None
-    source_resource_ids: list[uuid.UUID] | None = Field(None, min_length=1, max_length=200)
+    source_resource_ids: list[uuid.UUID] | None = Field(None, max_length=200)
     renderer: str | None = None
     schedule_cron: str | None = None
     cache_ttl_s: int | None = Field(None, ge=0, le=86400)
@@ -86,6 +86,12 @@ def _check_cron(cron: str | None, plugin, cfg) -> None:
 
 def _check_sources(db: Session, ctx: Ctx, plugin, ids: list[uuid.UUID]) -> None:
     ids = list(dict.fromkeys(ids))
+    if engine.is_derived(plugin):
+        if ids:
+            raise AppError("VALIDATION", f"{plugin.key} views read other views, not resources")
+        return
+    if not ids:
+        raise AppError("VALIDATION", "At least one source resource is required")
     for rid in ids:
         r = db.get(Resource, rid)
         if r is None:
@@ -93,6 +99,19 @@ def _check_sources(db: Session, ctx: Ctx, plugin, ids: list[uuid.UUID]) -> None:
         require_level(db, ctx.user, r, ResourceAcl, Level.use)  # creating a view needs 'use' on its sources
         if r.type != plugin.source_kind:
             raise AppError("VALIDATION", f"{plugin.key} views need {plugin.source_kind} resources")
+
+
+def _check_derived(db: Session, ctx: Ctx, plugin, cfg) -> None:
+    """Trend views: creating one needs 'use' on every source view; sources must be of an allowed
+    type and a trend source must be scheduled (spec 7.3)."""
+    if not engine.is_derived(plugin):
+        return
+    for src in engine.source_views(db, plugin, cfg):
+        require_level(db, ctx.user, src, ViewAcl, Level.use)
+        if src.type not in plugin.allowed_source_types:
+            raise AppError("VALIDATION", f"{plugin.key} views cannot read {src.type} views")
+        if getattr(plugin, "needs_scheduled_source", False) and not src.schedule_cron:
+            raise AppError("VALIDATION", "The source view must be scheduled so history is recorded")
 
 
 def _check_custom(db: Session, ctx: Ctx, cfg) -> None:
@@ -154,6 +173,7 @@ def create_view(body: ViewCreate, ctx: Ctx = Depends(current_ctx), db: Session =
     _unique_name(db, body.type, body.name)
     _check_custom(db, ctx, cfg)
     _check_sources(db, ctx, plugin, body.source_resource_ids)
+    _check_derived(db, ctx, plugin, cfg)
     _check_cron(body.schedule_cron, plugin, cfg)
     renderer = body.renderer or plugin.default_renderer
     if renderer not in RENDERERS:
@@ -187,6 +207,7 @@ def patch_view(vid: uuid.UUID, body: ViewPatch, ctx: Ctx = Depends(current_ctx),
     cfg = _validate_config(plugin, f["config"]) if "config" in f else plugin.config_schema(**v.config)
     if "config" in f:
         _check_custom(db, ctx, cfg)
+        _check_derived(db, ctx, plugin, cfg)
         v.config = cfg.model_dump(mode="json")
     if "source_resource_ids" in f:
         _check_sources(db, ctx, plugin, f["source_resource_ids"])
@@ -214,6 +235,10 @@ def delete_view(vid: uuid.UUID, ctx: Ctx = Depends(current_ctx), db: Session = D
                            .where(DashboardWidget.view_id == v.id).distinct()))
     if used:
         raise AppError("CONFLICT", "View is used by dashboards", {"dashboards": used})
+    users = [d.name for d in db.scalars(select(View)) if d.id != v.id and engine.is_derived(REGISTRY[d.type])
+             and v.id in REGISTRY[d.type].source_view_ids(REGISTRY[d.type].config_schema(**d.config))]
+    if users:
+        raise AppError("CONFLICT", "View is a source of other views", {"views": users})
     db.execute(delete(ViewAcl).where(ViewAcl.view_id == v.id))
     db.delete(v)
     db.commit()

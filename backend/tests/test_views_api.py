@@ -12,7 +12,7 @@ CAN_BUILD = ("inventory.oracle.create", "view.db_table.create")
 
 def test_types_and_template(admin):
     types = {t["key"]: t for t in admin.get("/api/view-types").json()}
-    assert set(types) == {"ssh_health", "db_table", "api_response"}
+    assert set(types) == {"ssh_health", "db_table", "api_response", "trend"}
     assert types["db_table"]["config_schema"]["properties"]["sql"]
     assert admin.get("/api/view-templates").json()[0]["name"] == "Daily errors"
 

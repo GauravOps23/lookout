@@ -61,9 +61,28 @@ def sources_of(db: Session, view: View) -> list[Resource]:
     return sorted(rows, key=lambda r: order[str(r.id)])
 
 
+def is_derived(plugin) -> bool:
+    return getattr(plugin, "derived", False)
+
+
+def source_views(db: Session, plugin, cfg) -> list[View]:
+    out = []
+    for vid in plugin.source_view_ids(cfg):
+        src = db.get(View, vid)
+        if src is None:
+            raise AppError("CONFLICT", "A source view no longer exists")
+        out.append(src)
+    return out
+
+
 def authorize(db: Session, user: User, view: View) -> list[Resource]:
     """Re-evaluated on EVERY run: losing access to a source stops the view working (spec 4.2)."""
     require_level(db, user, view, ViewAcl, Level.use)
+    plugin, cfg = load_plugin(view)
+    if is_derived(plugin):
+        for src in source_views(db, plugin, cfg):
+            authorize(db, user, src)  # use on the source view and on its resources
+        return []
     resources = sources_of(db, view)
     if len(resources) != len(view.source_resource_ids):
         raise AppError("CONFLICT", "A source resource no longer exists")
@@ -141,6 +160,51 @@ def execute(db: Session, view: View, resources: list[Resource], typed: dict, tri
     return result
 
 
+class _Loader:
+    """What a derived plugin may read: source results (authorised, run as the caller) and run history."""
+
+    def __init__(self, db: Session, user: User, triggered_by: str):
+        self.db, self.user, self.triggered_by = db, user, triggered_by
+
+    def _src(self, vid) -> View:
+        src = self.db.get(View, vid)
+        if src is None:
+            raise AppError("CONFLICT", "A source view no longer exists")
+        return src
+
+    def result(self, vid) -> dict:
+        return run_view(self.db, self.user, self._src(vid), None, triggered_by=self.triggered_by)
+
+    def history(self, vid, days: int) -> list[tuple[str, dict]]:
+        src = self._src(vid)
+        plugin, cfg = load_plugin(src)
+        phash = params_hash(bind_params(plugin.variables(cfg), None))  # scheduled runs use the defaults
+        q = (select(ViewRun).where(ViewRun.view_id == src.id, ViewRun.params_hash == phash,
+                                   ViewRun.status.in_(("ok", "partial")), ViewRun.result.is_not(None),
+                                   ViewRun.started_at >= now() - timedelta(days=days))
+             .order_by(ViewRun.started_at))
+        return [(as_utc(r.started_at).isoformat(), r.result) for r in self.db.scalars(q)]
+
+
+def execute_derived(db: Session, user: User, view: View, plugin, cfg, triggered_by: str) -> dict:
+    t0, started = time.monotonic(), now()
+    try:
+        result = plugin.derive(cfg, _Loader(db, user, triggered_by))
+    except AppError as e:
+        db.add(ViewRun(view_id=view.id, params_hash=params_hash({}), started_at=started, status="error",
+                       error=e.message, triggered_by=triggered_by,
+                       duration_ms=int((time.monotonic() - t0) * 1000)))
+        db.commit()
+        raise
+    ms = int((time.monotonic() - t0) * 1000)
+    result["meta"].update(cached=False, stale=False, generated_at=started.isoformat(), duration_ms=ms,
+                          sources=[{"view_id": str(i)} for i in plugin.source_view_ids(cfg)])
+    db.add(ViewRun(view_id=view.id, params_hash=params_hash({}), started_at=started, duration_ms=ms,
+                   status="ok", row_count=result["meta"]["row_count"], result=result, triggered_by=triggered_by))
+    db.commit()
+    return result
+
+
 def run_view(db: Session, user: User, view: View, params: dict | None, *, fresh: bool = False,
              triggered_by: str = "user") -> dict:
     resources = authorize(db, user, view)
@@ -156,6 +220,8 @@ def run_view(db: Session, user: User, view: View, params: dict | None, *, fresh:
             db.expire_all()
             if (hit := cached(db, view, phash, 5)):
                 return hit[0]
+        if is_derived(plugin):
+            return execute_derived(db, user, view, plugin, cfg, triggered_by)
         return execute(db, view, resources, typed, triggered_by)
 
 

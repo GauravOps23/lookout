@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Two generations of the same product live side by side. Not a git repository.
 
 - **Legacy "Servers Panel"** (repo root): `get_error.py` + `index.html`. A static dashboard of daily error counts per Oracle database. Still works until cutover.
-- **New "Lookout"** (`backend/`): an authenticated, permissioned FastAPI service that replaces it. Milestones M1-M3 are done and tested against fakes; M4 (combined/trend views, the "Sensei" LLM chatbot) is not started.
+- **New "Lookout"** (`backend/`): an authenticated, permissioned FastAPI service that replaces it. Milestones M1-M3 are done and tested against fakes; M4 is built except the combined view (V4, removed on request): trend views (`views/trend/`, a "derived" view type that reads another view's run history) and Sensei (`llm/`: config, tools, agent loop, SSE chat API; UI on the Sensei page). Sensei is tested only against a fake model.
 
 Design docs at the root: `spec.md` (authoritative, section numbers are cited in code and README), `PRD.md`, `PREREQUISITES.md`, `README.md` (run instructions, API list, deviations from the spec, what is and is not verified). Read the README "Deviations from the spec" before changing behaviour the spec describes.
 
@@ -41,7 +41,7 @@ There is no linter or formatter configured. Tests need no database or network: `
 - **Views** (`views/`): plugin system. A view type is a folder with a `plugin.py` registered by one line in `views/registry.py`; every plugin returns the single `ResultSet` contract from `views/base.py`. `engine.py` handles caching, coalescing, concurrency limits and fan-out, and must report per-source failures rather than swallow them. `db_table` SQL goes through `sqlguard.py` (SELECT-only allow-list); loosening it is a security change.
 - **Scheduler** (`scheduler/`): separate process (APScheduler, in-memory jobs re-read every 60 s): status checks, cron views run as their owner, retention.
 - **UI** (`static/`): plain HTML/CSS/JS single-page app (hash routes in `app.js`: overview, servers, views, dashboards, links, users, sensei placeholder) with no build step and a strict CSP: no inline script/style, no external fonts, never `innerHTML` (`tests/test_ui.py` enforces this). Set styles via `el.style.*`, not the `style` attribute. `[hidden]` is forced to `display:none` in `style.css` because layout rules otherwise override it. The JS has never been run in a real browser.
-- **Naming**: the product is "Lookout"; the planned LLM chatbot (M4) is "Sensei". The legacy dashboard name "Servers Panel" survives only in `legacy_import.py` (`DASHBOARD_NAME`) and the migration.
+- **Naming**: the product is "Lookout"; the LLM chatbot is "Sensei". The legacy dashboard name "Servers Panel" survives only in `legacy_import.py` (`DASHBOARD_NAME`) and the migration.
 - Plugins and connectors are synchronous (threaded), not async.
 
 ## Legacy panel notes

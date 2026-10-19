@@ -451,9 +451,93 @@ async function usersPage() {
     h("div", { class: "panel" }, h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Person", "Role", "Status", "Last sign-in", ""].map(x => h("th", {}, x)))), h("tbody", {}, rows)))));
 }
 
-function senseiPage() {
-  show(pageHead("Sensei", "Ask questions about your servers in plain language."),
-    empty("Sensei is not available yet", "Sensei will answer questions such as \"Summarise today's errors for POSTPAID\" and show which servers it used. It is the next milestone."));
+let senseiConv = null;
+
+async function senseiPage() {
+  const log = h("div", { class: "chat-log", "aria-live": "polite" });
+  const input = h("textarea", { rows: 2, placeholder: "Ask about your servers, e.g. \"Summarise today's errors\"", maxlength: 4000 });
+  const send = h("button", { type: "submit" }, "Ask");
+  const bubble = (who, ...kids) => { const b = h("div", { class: "msg " + who }, ...kids); log.append(b); log.scrollTop = log.scrollHeight; return b; };
+  const sourcesLine = list => h("p", { class: "mute src" }, "Used: " + list.map(s => s.name).join(", "));
+
+  async function ask(textValue) {
+    if (!senseiConv) senseiConv = (await api("POST", "/api/llm/conversations")).id;
+    bubble("user", textValue);
+    const status = bubble("bot mute", "Thinking\u2026");
+    const r = await fetch(`/api/llm/conversations/${senseiConv}/messages`, { method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf }, body: JSON.stringify({ text: textValue }) });
+    if (!r.ok) { const e = await r.json().catch(() => null); status.remove(); throw new Error((e && e.error && e.error.message) || "Request failed"); }
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    let buf = "", answer = null;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const block = buf.slice(0, i); buf = buf.slice(i + 2);
+        const m = /^event: (\w+)\ndata: (.*)$/s.exec(block);
+        if (!m) continue;
+        const data = JSON.parse(m[2]);
+        if (m[1] === "tool_call") status.textContent = "Checking " + data.name.replace(/_/g, " ") + "\u2026";
+        else if (m[1] === "token") { status.remove(); answer = bubble("bot", data.text); }
+        else if (m[1] === "sources" && answer) { if (data.length) answer.append(sourcesLine(data)); }
+        else if (m[1] === "error") { status.remove(); throw new Error(data.message); }
+      }
+    }
+  }
+
+  const form = h("form", { class: "chat-form", onsubmit: async e => {
+    e.preventDefault();
+    const t = input.value.trim();
+    if (!t) return;
+    input.value = ""; send.disabled = true;
+    try { await ask(t); } catch (x) { toast(x.message, true); } finally { send.disabled = false; input.focus(); }
+  } }, input, send);
+  input.addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
+
+  const actions = [h("button", { type: "button", class: "ghost", onclick: () => { senseiConv = null; log.replaceChildren(); } }, "New chat")];
+  if (me.is_admin) actions.push(h("button", { type: "button", class: "ghost", onclick: () => senseiSettings().catch(x => toast(x.message, true)) }, "Configure"));
+  show(pageHead("Sensei", "Ask questions about your servers in plain language. Sensei can only read views you can already use.", ...actions),
+    h("div", { class: "panel chat" }, log, form));
+  if (!senseiConv) bubble("bot mute", "Ask a question to begin. Sensei shows which views it used for each answer.");
+}
+
+async function senseiSettings() {
+  const c = await api("GET", "/api/admin/llm");
+  const groups = await api("GET", "/api/admin/groups").catch(() => []);
+  const on = h("input", { type: "checkbox" }); on.checked = c.enabled;
+  const url = text({ value: c.base_url }), model = text({ value: c.model });
+  const key = h("input", { type: "password", autocomplete: "new-password", placeholder: c.has_api_key ? "Saved. Leave blank to keep." : "Optional" });
+  const mode = select([["native", "Native tool calls"], ["json", "JSON fallback"]]); mode.value = c.tool_mode;
+  const prompt = h("textarea", {}, c.system_prompt);
+  const rate = num(c.rate_limit_per_10min, { min: 1 }), calls = num(c.max_tool_calls, { min: 1, max: 20 });
+  const rows = num(c.max_rows, { min: 1, max: 200 }), chars = num(c.max_chars, { min: 500, max: 50000 });
+  const picks = groups.map(g => { const cb = h("input", { type: "checkbox", value: g.id }); cb.checked = c.enabled_group_ids.includes(g.id); return [g, cb]; });
+  const result = h("p", { class: "mute" });
+  const test = h("button", { type: "button", class: "ghost small", onclick: async () => {
+    result.textContent = "Testing\u2026";
+    try { const r = await api("POST", "/api/admin/llm/test"); result.textContent = r.ok ? `Connected. Tool calls ${r.tool_calls_supported ? "work" : "were not used: try the JSON fallback"}.` : "Failed: " + r.error; }
+    catch (x) { result.textContent = x.message; }
+  } }, "Test saved settings");
+  modal("Configure Sensei", h("div", {},
+    h("label", { class: "check" }, on, "Sensei is on"),
+    field("Model endpoint (OpenAI-compatible)", url), field("Model", model), field("API key", key),
+    field("Tool calling", mode), field("Extra instructions", prompt),
+    field("Messages per user per 10 minutes", rate), field("Tool calls per question", calls),
+    field("Rows sent to the model", rows), field("Characters per tool result", chars),
+    h("fieldset", {}, h("legend", {}, "Groups allowed to use Sensei (admins always can)"),
+      ...picks.map(([g, cb]) => h("label", { class: "check" }, cb, g.name))),
+    test, result), {
+    onSubmit: async () => {
+      const body = { enabled: on.checked, base_url: url.value.trim(), model: model.value.trim(), temperature: c.temperature,
+        max_tokens: c.max_tokens, timeout_s: c.timeout_s, system_prompt: prompt.value, tool_mode: mode.value,
+        enabled_group_ids: picks.filter(([, cb]) => cb.checked).map(([g]) => g.id),
+        rate_limit_per_10min: +rate.value, max_tool_calls: +calls.value, max_rows: +rows.value, max_chars: +chars.value };
+      if (key.value) body.api_key = key.value;
+      await api("PUT", "/api/admin/llm", body);
+      toast("Sensei settings saved");
+    } });
 }
 
 async function sharedPage(token) {

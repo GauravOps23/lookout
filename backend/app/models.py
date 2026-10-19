@@ -188,3 +188,29 @@ class LinkUserCredential(IdMixin, Base):
     tile_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("link_tiles.id", ondelete="CASCADE"), index=True)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     secret_blob: Mapped[bytes] = mapped_column(LargeBinary)
+
+
+class LlmConversation(IdMixin, Base):
+    __tablename__ = "llm_conversations"
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(128), default="")
+
+
+class LlmMessage(IdMixin, Base):
+    __tablename__ = "llm_messages"
+    conversation_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("llm_conversations.id", ondelete="CASCADE"), index=True)
+    role: Mapped[str] = mapped_column(String(16))  # user | assistant
+    content: Mapped[str] = mapped_column(Text, default="")
+    sources: Mapped[list] = mapped_column(JSON, default=list)  # views/resources touched while answering
+
+
+class LlmAudit(IdMixin, Base):
+    """One row per tool call (spec 9.3); sensitive parameter values are never stored."""
+    __tablename__ = "llm_audit"
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid, index=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(Uuid, index=True)
+    tool: Mapped[str] = mapped_column(String(32))
+    args: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(16))  # ok | error
+    error: Mapped[str] = mapped_column(Text, default="")
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)

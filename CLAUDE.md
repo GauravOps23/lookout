@@ -4,17 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Two generations of the same product live side by side. Not a git repository.
+Two generations of the same product live side by side. Git repo on `main`.
 
 - **Legacy "Servers Panel"** (repo root): `get_error.py` + `index.html`. A static dashboard of daily error counts per Oracle database. Still works until cutover.
-- **New "Lookout"** (`backend/`): an authenticated, permissioned FastAPI service that replaces it. Milestones M1-M3 are done and tested against fakes; M4 is built except the combined view (V4, removed on request): trend views (`views/trend/`, a "derived" view type that reads another view's run history) and Sensei (`llm/`: config, tools, agent loop, SSE chat API; UI on the Sensei page). Sensei is tested only against a fake model.
+- **New "Lookout"** (`backend/`): an authenticated, permissioned FastAPI service that replaces it. Milestones M1-M3 are done and tested against fakes; M4 is built: trend views (`views/trend/`, a "derived" view type that reads another view's run history) and Sensei (`llm/`: config, tools, agent loop, SSE chat API; UI on the Sensei page). Sensei is tested only against a fake model.
 
-Design docs at the root: `spec.md` (authoritative, section numbers are cited in code and README), `PRD.md`, `PREREQUISITES.md`, `README.md` (run instructions, API list, deviations from the spec, what is and is not verified). Read the README "Deviations from the spec" before changing behaviour the spec describes.
+Design docs at the root: `spec.md` (authoritative, section numbers are cited in code and README), `PRD.md`, `PREREQUISITES.md`, `README.md` (run instructions, API list, deviations from the spec, what is and is not verified), `DEPLOYMENT.md` (RHEL 8 step-by-step). `gauravinstruction.md` is a local Windows "how to run again" cheat sheet that duplicates the Commands below. Read the README "Deviations from the spec" before changing behaviour the spec describes.
 
 ## Commands (run from `backend/`)
 
 ```bash
-python -m venv .venv && .venv/Scripts/activate      # Linux/macOS: source .venv/bin/activate
+python -m venv .venv && .venv/Scripts/activate      # PowerShell: .venv\Scripts\activate; Linux/macOS: source .venv/bin/activate
 pip install -r requirements-dev.txt
 python -m pytest                                     # all tests (~161, a couple of minutes)
 python -m pytest tests/test_sqlguard.py              # one file
@@ -29,7 +29,7 @@ python -m app.scheduler                              # separate process; run exa
 
 There is no linter or formatter configured. Tests need no database or network: `tests/conftest.py` sets env vars, uses a file-backed SQLite DB per test and fake Oracle/SSH/HTTP connectors. The `Api` helper there logs in and sends the CSRF header automatically.
 
-`backend/.env` and `dev.db` exist locally (gitignored in intent; there is a `.gitignore`, though no git repo). `deploy/docker-compose.yml` has never been run.
+`backend/.env` and `dev.db` exist locally (gitignored). `deploy/docker-compose.yml` has never been run. Production target is RHEL 8 (nginx, PostgreSQL 16): `deploy/lookout.sh` is an idempotent install/update script (run with sudo; env vars `RUN_USER`, `APP_DIR`, `DATABASE_URL`, `SERVER_NAME`, `PYTHON`), and `DEPLOYMENT.md` is the manual walkthrough.
 
 ## Backend architecture (`backend/app/`)
 
@@ -40,7 +40,7 @@ There is no linter or formatter configured. Tests need no database or network: `
 - **Resources** (`resources/`): types `ssh`, `oracle`, `api`, each with a connector in `resources/connectors/` (Oracle thin mode in a read-only transaction; SSH with TOFU host-key pinning; HTTP GET/POST with SSRF guard).
 - **Views** (`views/`): plugin system. A view type is a folder with a `plugin.py` registered by one line in `views/registry.py`; every plugin returns the single `ResultSet` contract from `views/base.py`. `engine.py` handles caching, coalescing, concurrency limits and fan-out, and must report per-source failures rather than swallow them. `db_table` SQL goes through `sqlguard.py` (SELECT-only allow-list); loosening it is a security change.
 - **Scheduler** (`scheduler/`): separate process (APScheduler, in-memory jobs re-read every 60 s): status checks, cron views run as their owner, retention.
-- **UI** (`static/`): plain HTML/CSS/JS single-page app (hash routes in `app.js`: overview, servers, views, dashboards, links, users, sensei placeholder) with no build step and a strict CSP: no inline script/style, no external fonts, never `innerHTML` (`tests/test_ui.py` enforces this). Set styles via `el.style.*`, not the `style` attribute. `[hidden]` is forced to `display:none` in `style.css` because layout rules otherwise override it. The JS has never been run in a real browser.
+- **UI** (`static/`): plain HTML/CSS/JS single-page app (hash routes in `app.js`: overview, servers, views, dashboards, links, users, sensei) with no build step and a strict CSP: no inline script/style, no external fonts, never `innerHTML` (`tests/test_ui.py` enforces this). Set styles via `el.style.*`, not the `style` attribute. `[hidden]` is forced to `display:none` in `style.css` because layout rules otherwise override it. The JS has never been run in a real browser.
 - **Naming**: the product is "Lookout"; the LLM chatbot is "Sensei". The legacy dashboard name "Servers Panel" survives only in `legacy_import.py` (`DASHBOARD_NAME`) and the migration.
 - Plugins and connectors are synchronous (threaded), not async.
 

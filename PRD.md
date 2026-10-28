@@ -37,7 +37,6 @@ Every view type is its own self-contained plugin with its own config form, permi
 | V1 | **Server Health** | SSH resource | whitelisted checks (CPU, mem, disk, load, uptime, process); custom command only for permitted users | status cards + gauges |
 | V2 | **DB Table** | Oracle resource | saved read-only SELECT or table+columns+filters; params (e.g. `{{today}}`); row limit + timeout. Existing error-count query = first template | paged table |
 | V3 | **API Response** | REST/SOAP resource | GET/POST, headers, body, JSONPath/XPath field mapping | key-value / table |
-| V4 | **Combined** | 2 existing V2 (or V2+V3) views | join key + join type, done in-app on row-capped results (not cross-DB SQL); needs access to both sources | joined table |
 | V5 | **Metric/Trend** (suggested) | any view with a numeric column | stored history of scheduled runs | line/bar chart |
 
 - Output formats are likewise separate renderers, selectable per view/widget: table, key-value cards, chart (line/bar), status badge, raw JSON; CSV export for table.
@@ -65,7 +64,7 @@ Users can rearrange/hide widgets.
 ### 3.7 Local LLM chatbot "Sensei" (point 7)
 - Admin configures provider: Ollama / llama.cpp / vLLM / any OpenAI-compatible endpoint; model name, temperature, max tokens, timeout, system prompt; enable/disable per group.
 - **Chatbot UI**: floating chat widget/side panel available on every page (and a full-page chat). Conversation history per user, streaming replies, "sources used" chips showing which resources/views were called, and a "summarise this dashboard/view" quick action when opened from a page.
-- **Resources as tools**: each resource and view the user can access is exposed to the bot as a tool, auto-generated from the view type's `llmToolSchema` (see 3.4), e.g. `list_resources`, `list_views`, `run_view(id, params)` (DB table / server health / API / combined), `get_view_summary(id)`, `query_view_table(id, filter, limit)`. The bot picks tools, receives the normalized `ResultSet` (truncated/aggregated to token cap), and writes a summary. Admin can toggle per resource "allow LLM access".
+- **Resources as tools**: each resource and view the user can access is exposed to the bot as a tool, auto-generated from the view type's `llmToolSchema` (see 3.4), e.g. `list_resources`, `list_views`, `run_view(id, params)` (DB table / server health / API), `get_view_summary(id)`, `query_view_table(id, filter, limit)`. The bot picks tools, receives the normalized `ResultSet` (truncated/aggregated to token cap), and writes a summary. Admin can toggle per resource "allow LLM access".
 - Tools execute **as the asking user**, so ACL applies to the LLM too; a resource the user cannot open is not even listed to the bot.
 - Guardrails: LLM never gets credentials; read-only tools only; row/token caps (truncate/aggregate before sending); log every prompt, tool call and result; per-user rate limit. Treat data returned by tools as untrusted (prompt-injection from DB/API content) — no write tools.
 - Fallback: if the model has no native tool-calling, use a JSON-action prompt loop.
@@ -101,7 +100,7 @@ Audit log (login, permission change, secret reveal, view run, LLM tool call); he
 1. **MVP-1 Foundation**: auth, admin user/group mgmt, RBAC, audit log, encrypted secret store, settings backup/restore.
 2. **MVP-2 Inventory + views**: Oracle + SSH + REST/SOAP resources with test-connection; DB table view, server-health view; scheduler + cache; **migrate current error-count job and `serverlist_update`** as a first template, replacing `get_error.py` and the hand-edited `index.html`.
 3. **MVP-3 Dashboards & sharing**: widgets, ACL sharing, home dashboard, link panel.
-4. **MVP-4 Combined views & LLM**: join views, LLM config, summarise, tool-calling.
+4. **MVP-4 Trend views & LLM**: trend views, LLM config, summarise, tool-calling.
 5. **Later**: LDAP/SSO, 2FA, alerting (mail/Teams/SMS on thresholds), web terminal, anomaly detection, mobile view.
 
 ## 7. Further suggestions

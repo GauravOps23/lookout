@@ -10,7 +10,7 @@ CATALOG: frozenset[str] = frozenset({
     "admin.users", "admin.groups", "admin.settings", "admin.backup", "admin.llm", "admin.audit",
     "inventory.ssh.create", "inventory.oracle.create", "inventory.api.create",
     "view.ssh_health.create", "view.ssh.custom", "view.db_table.create",
-    "view.api_response.create", "view.combined.create", "view.trend.create",
+    "view.api_response.create", "view.trend.create",
     "dashboard.create", "link.create", "panel.access", "llm.use",
 })
 SCOPED = frozenset({"panel.access"})

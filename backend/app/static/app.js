@@ -10,7 +10,7 @@ const PERMISSIONS = {
   "inventory.oracle.create": "Add Oracle databases", "inventory.ssh.create": "Add SSH hosts", "inventory.api.create": "Add APIs",
   "view.db_table.create": "Create database views", "view.ssh_health.create": "Create SSH health views",
   "view.ssh.custom": "Run custom SSH commands", "view.api_response.create": "Create API views",
-  "view.combined.create": "Create combined views", "view.trend.create": "Create trend views",
+  "view.trend.create": "Create trend views",
   "dashboard.create": "Create dashboards", "link.create": "Add links", "llm.use": "Ask Sensei",
 };
 

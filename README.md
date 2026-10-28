@@ -4,7 +4,7 @@ Backend for the panel described in [`spec.md`](spec.md) (derived from `PRD.md`).
 "Servers Panel" (`index.html` + `get_error.py`, still in this folder) with an authenticated, permissioned service.
 
 **Status: Milestones M1 (Foundation), M2 (Inventory & views) and M3 (Dashboards & link panel, with a small
-read-oriented web UI) are implemented and tested against fakes. M4 is partly built: trend views and Sensei (tested against a fake model, not a real LLM). The combined view is not built.** See [Status](#status) for what is and is not verified.
+read-oriented web UI) are implemented and tested against fakes. M4 is partly built: trend views and Sensei (tested against a fake model, not a real LLM).** See [Status](#status) for what is and is not verified.
 
 See [PREREQUISITES.md](PREREQUISITES.md) for what you need installed and which access to prepare.
 
@@ -162,7 +162,7 @@ its categories from the live part of `index.html` (commented-out categories are 
 | M1 Foundation | Done, tested |
 | M2 Inventory & views | Done, tested against fake connectors |
 | M3 Dashboards & link panel, home, minimal UI | Done, tested at the API level; UI not exercised in a browser |
-| M4 Trend view & "Sensei" LLM chatbot | Built, tested against fakes. Combined view (V4) deliberately not built. Sensei replies are not token-streamed: the model is called non-streaming and the answer is sent as one `token` event. Sensei config is not in backups. Needs a real endpoint test (Ollama/vLLM) |
+| M4 Trend view & "Sensei" LLM chatbot | Built, tested against fakes. Sensei replies are not token-streamed: the model is called non-streaming and the answer is sent as one `token` event. Sensei config is not in backups. Needs a real endpoint test (Ollama/vLLM) |
 
 **Verified:** 161 automated tests; migrations 0001-0003 upgrade, downgrade and upgrade
 again on SQLite; the migration CLI against a scratch database with the real `index.html`.

@@ -24,7 +24,7 @@ Reverse proxy (nginx/caddy, TLS)
    |
 FastAPI app  --- routers: auth, admin, resources, views, dashboards, links, llm, backup
    |   |-- services: authz, secrets, view_engine, scheduler, llm_agent, backup, audit
-   |   |-- view plugins: views/{ssh_health,db_table,api_response,combined,trend}
+   |   |-- view plugins: views/{ssh_health,db_table,api_response,trend}
    |   `-- connectors: oracle (python-oracledb), ssh (paramiko), http (httpx + zeep)
    |
 PostgreSQL (app data)      Worker pool (thread pool, per-resource semaphores)
@@ -45,7 +45,7 @@ backend/app/
   authz/       (permissions.py, acl.py)
   secrets/     (vault.py)            # AES-GCM envelope encryption
   resources/   (models.py, router.py, connectors/{oracle,ssh,http}.py)
-  views/       (registry.py, base.py, ssh_health/, db_table/, api_response/, combined/, trend/)
+  views/       (registry.py, base.py, ssh_health/, db_table/, api_response/, trend/)
   scheduler/   (jobs.py, cache.py)
   dashboards/  links/  llm/  backup/  audit/
   migrations/  (alembic)
@@ -101,7 +101,7 @@ Indexes: `resource_acl(principal_id)`, `view_runs(view_id, started_at desc)`, `a
 ### 4.1 Permission catalog
 `admin.users`, `admin.groups`, `admin.settings`, `admin.backup`, `admin.llm`, `admin.audit`,
 `inventory.ssh.create`, `inventory.oracle.create`, `inventory.api.create`,
-`view.ssh_health.create`, `view.ssh.custom`, `view.db_table.create`, `view.api_response.create`, `view.combined.create`, `view.trend.create`,
+`view.ssh_health.create`, `view.ssh.custom`, `view.db_table.create`, `view.api_response.create`, `view.trend.create`,
 `dashboard.create`, `link.create`, `panel.access` (scope = link tile or dashboard id), `llm.use`.
 `is_admin` implies all.
 
@@ -115,7 +115,7 @@ Indexes: `resource_acl(principal_id)`, `view_runs(view_id, started_at desc)`, `a
 Level meaning: **view** = see metadata and cached data; **use** = run it / use as a source for views; **edit** = change config; **manage** = edit + share + delete.
 
 Derived rules:
-- Creating a view requires `use` on its source resource(s)/view(s). A combined view requires `use` on both sources; a user who later loses access to a source can no longer run the combined view (the check is re-evaluated on every run).
+- Creating a view requires `use` on its source resource(s)/view(s). A trend view requires `use` on its source view; a user who later loses access to it can no longer run the trend view (the check is re-evaluated on every run).
 - Viewing a dashboard shows widgets only for views the viewer has `view` on; others render a "no access" placeholder (data never leaves the server).
 - Dashboard share links (`share_token`) grant read-only access to the dashboard's *cached* results only; they never trigger live connector calls.
 
@@ -219,7 +219,6 @@ Rules:
 - Scheduled runs use `default` values (or saved "schedule parameters"); a scheduled view with a required variable lacking a default is rejected at save time.
 - Cache key = view id + hash of variable values.
 
-**V4 combined** - config `{left_view_id, right_view_id, join:"inner|left", on:[{left,right}], select:[...], row_limit}`. Runs both sources (from cache if fresh, else live), hash-joins in memory, caps at `MAX_ROWS`, prefixes colliding column names. Sources limited to V2/V3 results; no nesting of combined views (prevents cycles).
 
 **V5 trend** - config `{source_view_id, value_column, group_by, aggregation:"sum|avg|max|count", window_days}`. Reads `view_runs` history of the source view; requires the source to be scheduled. Output: `(timestamp, series, value)`.
 
@@ -336,7 +335,7 @@ Equivalence check: for one day, the merged ResultSet per service must match the 
 | M1 Foundation | sections 3, 4, 5, 10, 11, 12 + skeleton UI (login, admin users/groups, audit) | admin can create user+group, grant permissions, backup/restore works on empty DB |
 | M2 Inventory & views | sections 6, 7 (V1-V3), scheduler, section 15 migration | all ~60 Oracle servers imported; daily-errors view matches old CSVs |
 | M3 Dashboards | section 8 | home page + shared dashboards + link panel working |
-| M4 Combined & LLM | V4, V5, section 9 | chatbot answers "summarise today's errors for POSTPAID" using tools, with sources |
+| M4 Trend & LLM | V5, section 9 | chatbot answers "summarise today's errors for POSTPAID" using tools, with sources |
 | Later | LDAP/SSO, TOTP, alerting, proxy-injected panel login, web terminal | - |
 
 ## 18. Open items still needing owner input

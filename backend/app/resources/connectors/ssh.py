@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import io
 
 import paramiko
 
@@ -10,6 +11,18 @@ MAX_OUTPUT = 64 * 1024
 
 def _fingerprint(key: paramiko.PKey) -> str:
     return "SHA256:" + base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode().rstrip("=")
+
+
+def _load_key(text: str, passphrase: str | None) -> paramiko.PKey:
+    """PKey itself can't parse keys; try each concrete type."""
+    for cls in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
+        try:
+            return cls.from_private_key(io.StringIO(text), passphrase)
+        except paramiko.PasswordRequiredException:
+            raise ConnectorError("KEY_PASSPHRASE_REQUIRED")
+        except paramiko.SSHException:
+            continue
+    raise ConnectorError("KEY_INVALID")
 
 
 class _Pin(paramiko.MissingHostKeyPolicy):
@@ -35,8 +48,7 @@ class SshConnector:
         if c["auth"] == "password":
             kw["password"] = s.get("password")
         elif c["auth"] == "key":
-            import io
-            kw["pkey"] = paramiko.PKey.from_private_key(io.StringIO(s["private_key"]), s.get("passphrase"))
+            kw["pkey"] = _load_key(s["private_key"], s.get("passphrase"))
         else:  # local: the app account's agent / known keys
             kw.update(allow_agent=True, look_for_keys=True)
         client.connect(**kw)

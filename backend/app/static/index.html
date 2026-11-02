@@ -9,15 +9,24 @@
 <body>
   <div id="shell">
     <aside id="bar" hidden>
-      <a class="brand" href="#/"><span class="lamp" aria-hidden="true"></span>Lookout</a>
+      <div class="brandrow">
+        <a class="brand" href="#/"><span class="lamp" aria-hidden="true"></span>Lookout</a>
+        <button id="pin" type="button" class="pin" aria-pressed="true" title="Keep the menu open">Pin</button>
+      </div>
       <nav id="nav" aria-label="Main"></nav>
       <div class="me">
         <span id="who"></span>
         <button id="logout" type="button" class="ghost">Sign out</button>
       </div>
     </aside>
-    <main id="app"><p class="mute pad">Loading…</p></main>
+    <div id="col">
+      <header id="topbar" hidden>
+        <button id="burger" type="button" aria-label="Open or close the menu" aria-controls="bar" aria-expanded="true">&#9776;</button>
+      </header>
+      <main id="app"><p class="mute pad">Loading…</p></main>
+    </div>
   </div>
+  <div id="scrim" hidden></div>
   <div id="toasts" role="status" aria-live="polite"></div>
   <script src="/app.js"></script>
 </body>

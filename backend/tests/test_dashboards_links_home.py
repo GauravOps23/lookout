@@ -229,7 +229,9 @@ def test_home_is_scoped_to_what_the_caller_can_see(admin, make_user, fakes):
     heat = admin.get("/api/home/heatmap").json()
     assert set(heat) == {"5G", "CEIR", "untagged"} and heat["5G"][0]["status"] == "up"
     assert admin.get("/api/home/summary").json()["resources"] == {"up": 1, "unknown": 1}
+    assert admin.get("/api/home/summary").json()["by_type"] == {"oracle": {"up": 1, "unknown": 1}}
     assert u.get("/api/home/heatmap").json() == {} and u.get("/api/home/summary").json()["resources"] == {}
+    assert u.get("/api/home/summary").json()["by_type"] == {}
     admin.put(f"/api/resources/{a}/acl", json={"entries": [
         {"principal_type": "user", "principal_id": u.id, "level": "view"}]})
     assert list(u.get("/api/home/heatmap").json()) == ["5G", "CEIR"]

@@ -57,7 +57,7 @@ def purge(factory, result_days: int = RESULT_RETENTION_DAYS, meta_days: int = ME
     with factory() as db:
         t = now()
         stripped = db.execute(update(ViewRun).where(ViewRun.started_at < t - timedelta(days=result_days),
-                                                    ViewRun.result.is_not(None)).values(result=None)).rowcount
+                                                    ViewRun.result.is_not(None)).values(result=None, rows_blob=None)).rowcount
         deleted = db.execute(delete(ViewRun).where(ViewRun.started_at < t - timedelta(days=meta_days))).rowcount
         db.commit()
     return {"results_dropped": stripped, "runs_deleted": deleted}

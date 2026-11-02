@@ -28,7 +28,7 @@ class Mapping(BaseModel):
 
 class SoapCfg(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    operation: str = Field(pattern=r"^[A-Za-z0-9_:./#-]{1,200}$")  # sent as SOAPAction
+    operation: str = Field("", pattern=r"^[A-Za-z0-9_:./#-]{0,200}$")  # optional SOAPAction; headers can also set it
     envelope_template: str
 
 
@@ -43,6 +43,7 @@ class ApiResponseConfig(BaseModel):
     soap: SoapCfg | None = None
     variables: list[Variable] = []
     mapping: Mapping | None = None
+    output: Literal["table", "raw"] = "table"  # raw: HTTP status + body as received, shown even for 4xx/5xx
 
     @model_validator(mode="after")
     def _check(self):
@@ -134,6 +135,21 @@ def map_xml(root, mapping: Mapping | None) -> tuple[list[dict], list[list]]:
     return [{"name": f.name, "type": f.type} for f in mapping.fields], rows
 
 
+RAW_COLUMNS = [{"name": "status", "type": "number"}, {"name": "body", "type": "string"}]
+RAW_LIMIT = 256 * 1024  # characters of body kept in the stored result
+
+
+def raw_result(h: Handle, status: int, data: bytes, duration_ms: int) -> dict:
+    """One row: the HTTP status and the body, JSON pretty-printed. Nothing is parsed as XML, so nothing is expanded."""
+    text = data.decode("utf-8", errors="replace")
+    try:
+        text = json.dumps(json.loads(text), indent=2, ensure_ascii=False)
+    except ValueError:
+        pass  # not JSON (XML, plain text): shown as received
+    return result_set(RAW_COLUMNS, [[status, text[:RAW_LIMIT]]], source=h.id, duration_ms=duration_ms,
+                      truncated=len(text) > RAW_LIMIT)
+
+
 class ApiResponseView:
     key = "api_response"
     permission = "view.api_response.create"
@@ -155,18 +171,28 @@ class ApiResponseView:
                 headers[k] = render.header_value(t, params)
             except ValueError:
                 raise AppError("VALIDATION", "Invalid header value") from None
+        def has(name: str) -> bool:
+            return name.lower() in {k.lower() for k in headers}
+
+        def default(name: str, value: str) -> None:  # like Postman: a header the user typed always wins
+            if not has(name):
+                headers[name] = value
+
         if h.config["kind"] == "soap":
             if not cfg.soap:
                 raise AppError("VALIDATION", "soap settings are required for a SOAP resource")
-            headers.update({"Content-Type": "text/xml; charset=utf-8", "SOAPAction": f'"{cfg.soap.operation}"'})
+            default("Content-Type", "text/xml; charset=utf-8")
+            ctype = next((v for k, v in headers.items() if k.lower() == "content-type"), "")
+            if cfg.soap.operation or "soap+xml" not in ctype.lower():  # SOAP 1.2 needs no SOAPAction
+                default("SOAPAction", f'"{cfg.soap.operation}"')
             body = render.xml_text(cfg.soap.envelope_template, params).encode()
         elif cfg.body_template is not None:
             data = render.json_value(cfg.body_template, params)
             if cfg.body_format == "form":
-                headers["Content-Type"] = "application/x-www-form-urlencoded"
+                default("Content-Type", "application/x-www-form-urlencoded")
                 body = urllib.parse.urlencode(data if isinstance(data, dict) else {}).encode()
             else:
-                headers["Content-Type"] = "application/json"
+                default("Content-Type", "application/json")
                 body = json.dumps(data).encode()
         return url, headers, body
 
@@ -175,6 +201,8 @@ class ApiResponseView:
         t0 = time.monotonic()
         method = "POST" if h.config["kind"] == "soap" else cfg.method
         status, data = ctx.meta["connectors"]["api"].request(h, method, url, headers, body)
+        if cfg.output == "raw":
+            return raw_result(h, status, data, int((time.monotonic() - t0) * 1000))
         if status >= 400:
             raise ConnectorError(f"API returned HTTP {status}")
         try:

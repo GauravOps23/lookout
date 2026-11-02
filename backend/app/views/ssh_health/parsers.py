@@ -31,6 +31,10 @@ def command(check: str, args: dict) -> str:
         return "free -m"
     if check == "uptime":
         return "cat /proc/uptime"
+    if check == "swap":
+        return "free -m"
+    if check == "iowait":
+        return "head -1 /proc/stat; sleep 1; head -1 /proc/stat"
     if check == "disk":
         mount = args.get("mount", "/")
         if not _MOUNT.match(mount) or ".." in mount:
@@ -48,7 +52,7 @@ def command(check: str, args: dict) -> str:
     raise ArgError(f"unknown check: {check}")
 
 
-CHECKS = ("cpu_load", "mem", "disk", "uptime", "process", "port")
+CHECKS = ("cpu_load", "mem", "swap", "iowait", "disk", "uptime", "process", "port")
 
 
 def parse(check: str, args: dict, output: str, warn: float | None = None, crit: float | None = None) -> list[tuple]:
@@ -63,6 +67,18 @@ def parse(check: str, args: dict, output: str, warn: float | None = None, crit: 
         pct = round(used / total * 100, 1) if total else 0.0
         return [(check, "used_pct", pct, "%", _grade(pct, warn, crit)), (check, "total", total, "MB", OK),
                 (check, "used", used, "MB", OK)]
+    if check == "swap":
+        line = next(ln for ln in out.splitlines() if ln.lower().startswith("swap:")).split()
+        total, used = float(line[1]), float(line[2])
+        pct = round(used / total * 100, 1) if total else 0.0  # no swap configured is 0%, not an error
+        return [(check, "used_pct", pct, "%", _grade(pct, warn, crit)), (check, "total", total, "MB", OK),
+                (check, "used", used, "MB", OK)]
+    if check == "iowait":
+        # two samples of the aggregate "cpu" line one second apart: user nice system idle iowait irq softirq steal
+        a, b = ([int(x) for x in ln.split()[1:9]] for ln in out.splitlines()[:2] if ln.startswith("cpu "))
+        total = sum(b) - sum(a)
+        pct = round((b[4] - a[4]) / total * 100, 1) if total > 0 else 0.0
+        return [(check, "iowait_pct", pct, "%", _grade(pct, warn, crit))]
     if check == "disk":
         line = out.splitlines()[-1].split()
         pct = float(line[4].rstrip("%"))

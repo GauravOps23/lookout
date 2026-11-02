@@ -19,6 +19,57 @@ def test_group_permission_grants_access(admin, make_user):
     assert u.get("/api/admin/users").status_code == 403  # only what was granted
 
 
+def test_group_can_be_renamed_and_edited(admin, make_user):
+    a = admin.post("/api/admin/groups", json={"name": "ops"}).json()
+    admin.post("/api/admin/groups", json={"name": "dba"})
+    r = admin.patch(f"/api/admin/groups/{a['id']}", json={"name": "operators", "description": "on call"})
+    assert r.status_code == 200 and r.json()["name"] == "operators" and r.json()["description"] == "on call"
+    assert admin.patch(f"/api/admin/groups/{a['id']}", json={"name": "dba"}).status_code == 409  # name taken
+    assert admin.patch(f"/api/admin/groups/{a['id']}", json={"description": "x"}).json()["name"] == "operators"
+    assert make_user("ivy").patch(f"/api/admin/groups/{a['id']}", json={"name": "z"}).status_code == 403
+
+
+def test_delete_user_and_guards(admin, make_user):
+    from tests.helpers import new_oracle
+
+    me = admin.get("/api/auth/me").json()["user"]["id"]
+    assert admin.delete(f"/api/admin/users/{me}").status_code == 409  # not yourself
+
+    g = admin.post("/api/admin/groups", json={"name": "temps"}).json()
+    u = make_user("zed")
+    admin.put(f"/api/admin/groups/{g['id']}/members", json={"user_ids": [u.id]})
+    assert admin.delete(f"/api/admin/users/{u.id}").status_code == 204
+    assert u.id not in [x["id"] for x in admin.get("/api/admin/users").json()]
+    assert admin.get("/api/admin/groups").json()[0]["members"] == []
+    assert "user.delete" in [a["action"] for a in admin.get("/api/home/activity").json()]
+    assert admin.delete(f"/api/admin/users/{u.id}").status_code == 404
+
+    # a user who owns something cannot be deleted until it is gone
+    ops = make_user("ops")
+    admin.put(f"/api/admin/users/{ops.id}/permissions", json={"permissions": [
+        {"permission": "admin.users"}, {"permission": "inventory.oracle.create"}]})
+    res = new_oracle(ops, "OPS1")
+    r = admin.delete(f"/api/admin/users/{ops.id}")
+    assert r.status_code == 409 and "1 connections" in r.json()["error"]["message"]
+    assert admin.delete(f"/api/resources/{res['id']}").status_code == 204
+    # ops (not an admin) cannot delete the only active administrator
+    assert ops.delete(f"/api/admin/users/{me}").status_code == 409
+    assert admin.delete(f"/api/admin/users/{ops.id}").status_code == 204
+
+
+def test_the_last_administrator_cannot_be_demoted_or_deactivated(admin, make_user):
+    me = admin.get("/api/auth/me").json()["user"]["id"]
+    ops = make_user("ops2")
+    admin.put(f"/api/admin/users/{ops.id}/permissions", json={"permissions": [{"permission": "admin.users"}]})
+    for change in ({"is_admin": False}, {"is_active": False}):  # ops is not an admin, so only the guard stops this
+        r = ops.patch(f"/api/admin/users/{me}", json=change)
+        assert r.status_code == 409 and "at least one active administrator" in r.json()["error"]["message"]
+    boss = make_user("boss2", is_admin=True)                       # a second administrator lifts the restriction
+    assert ops.patch(f"/api/admin/users/{boss.id}", json={"is_admin": False}).status_code == 200
+    assert ops.patch(f"/api/admin/users/{boss.id}", json={"is_admin": True}).status_code == 200
+    assert ops.patch(f"/api/admin/users/{me}", json={"is_admin": False}).status_code == 200
+
+
 def test_direct_permission_and_validation(admin, make_user):
     u = make_user("hank")
     bad = admin.put(f"/api/admin/users/{u.id}/permissions", json={"permissions": [{"permission": "nope"}]})

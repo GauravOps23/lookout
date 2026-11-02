@@ -140,7 +140,8 @@ class ViewRun(IdMixin, Base):
     status: Mapped[str] = mapped_column(String(8))  # ok | partial | error
     error: Mapped[str] = mapped_column(Text, default="")
     row_count: Mapped[int] = mapped_column(Integer, default=0)
-    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # capped; purged after retention
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # preview (first PREVIEW_ROWS rows); purged after retention
+    rows_blob: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)  # gzip JSON of all rows, latest run only
     triggered_by: Mapped[str] = mapped_column(String(16), default="user")  # schedule | user | llm
 
 

@@ -11,13 +11,16 @@ from sqlalchemy.orm import Session
 from app.authz.access import levels_for
 from app.authz.acl import Level
 from app.errors import AppError
-from app.models import Resource, ResourceAcl, User, View, ViewAcl
+from app.models import Dashboard, DashboardAcl, DashboardWidget, Resource, ResourceAcl, User, View, ViewAcl
 from app.views import engine
 from app.views.base import variables_json_schema
 
 SECRET_COL = re.compile(r"pass(word|wd)?|secret|token|api_?key|authorization|credential|private", re.I)
 MAX_CELL = 200
+RAW_BODY_CELL = 4000  # an API request shown as raw status + body: the body is the answer, so keep far more of it
 OPS = ("=", "!=", "<", ">", "<=", ">=", "contains")
+RESOURCE_TYPES = ["ssh", "oracle", "api", "ocp"]
+MAX_DASHBOARD_WIDGETS = 12  # per summary, so one question cannot trigger dozens of view runs
 
 
 class ToolError(Exception):
@@ -28,15 +31,24 @@ def _obj(props: dict, required: list[str] | None = None) -> dict:
     return {"type": "object", "properties": props, "required": required or [], "additionalProperties": False}
 
 
-_ID = {"type": "string", "description": "View id from list_views"}
+_ID = {"type": "string", "description": "View id from list_views, or the exact view name"}
 TOOLS = [
-    {"name": "list_resources", "description": "List servers, databases and APIs you can see (no secrets).",
-     "parameters": _obj({"tag": {"type": "string"}, "type": {"type": "string", "enum": ["ssh", "oracle", "api"]}})},
-    {"name": "list_views", "description": "List saved views with the parameters each one accepts.",
+    {"name": "list_resources", "description": "List servers, databases, APIs and clusters you can see (no secrets).",
+     "parameters": _obj({"tag": {"type": "string"}, "type": {"type": "string", "enum": RESOURCE_TYPES}})},
+    {"name": "get_resource_counts", "description": "How many servers, databases, APIs and clusters there are and how many are "
+     "up or down, in total and per type, plus the ones that are down. Use this for any question about counts or health; "
+     "never count by hand.",
+     "parameters": _obj({"tag": {"type": "string"}, "type": {"type": "string", "enum": RESOURCE_TYPES}})},
+    {"name": "list_views", "description": "List saved views and saved API requests with the parameters each one accepts.",
      "parameters": _obj({"type": {"type": "string"}})},
-    {"name": "run_view", "description": "Run a saved view (cached result if fresh). Ask the user for any missing "
-     "required parameter instead of guessing.",
+    {"name": "run_view", "description": "Run a saved view or send a saved API request (cached result if fresh). Ask the "
+     "user for any missing required parameter instead of guessing.",
      "parameters": _obj({"view_id": _ID, "params": {"type": "object"}}, ["view_id"])},
+    {"name": "list_dashboards", "description": "List the dashboards you can see.", "parameters": _obj({})},
+    {"name": "summarize_dashboard", "description": "Summarise a dashboard by its name or id: every widget's latest stored "
+     "result. Set refresh to true to run widgets that have no stored result yet.",
+     "parameters": _obj({"dashboard": {"type": "string", "description": "Dashboard name or id"},
+                         "refresh": {"type": "boolean"}}, ["dashboard"])},
     {"name": "get_view_summary", "description": "Row count, column statistics and top rows of a view's latest result.",
      "parameters": _obj({"view_id": _ID}, ["view_id"])},
     {"name": "query_view_table", "description": "Filter and sort a view's result in memory (never SQL).",
@@ -55,8 +67,8 @@ def wrap(obj) -> str:
 
 
 # ---- reduce ----------------------------------------------------------------------------------
-def _cell(v):
-    return v[:MAX_CELL] + "…" if isinstance(v, str) and len(v) > MAX_CELL else v
+def _cell(v, limit: int = MAX_CELL):
+    return v[:limit] + "…" if isinstance(v, str) and len(v) > limit else v
 
 
 def _stats(col: dict, values: list) -> dict | None:
@@ -81,6 +93,7 @@ def reduce(res: dict, max_rows: int, max_chars: int) -> dict:
         s = _stats(c, [r[j] for r in rows])
         if s:
             stats[c["name"]] = s
+    cell_limit = RAW_BODY_CELL if [c["name"] for c in cols] == ["status", "body"] else MAX_CELL
     meta = {k: res["meta"][k] for k in ("cached", "stale", "generated_at", "truncated") if k in res["meta"]}
     if res["meta"].get("sources"):
         meta["source_errors"] = [{"name": s.get("name"), "error": s["error"]} for s in res["meta"]["sources"]
@@ -88,7 +101,7 @@ def reduce(res: dict, max_rows: int, max_chars: int) -> dict:
     n = min(max_rows, total)
     while True:
         out = {"columns": [c["name"] for c in cols], "row_count": total,
-               "rows": [[_cell(v) for v in r] for r in rows[:n]], "stats": stats, "meta": meta}
+               "rows": [[_cell(v, cell_limit) for v in r] for r in rows[:n]], "stats": stats, "meta": meta}
         if n < total:
             out["note"] = f"Showing {n} of {total} rows."
         if len(json.dumps(out, default=str)) <= max_chars or (n == 0 and not stats):
@@ -106,11 +119,23 @@ def _resources_ok(db: Session, view: View) -> bool:
     return len(rows) == len(ids) and all(r.llm_allowed for r in rows)
 
 
+def _view_by_name(db: Session, user: User, raw) -> View | None:
+    """A view the user typed by name. Only views the assistant may use and the user can see are candidates."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    rows = [v for v in db.scalars(select(View)) if v.llm_allowed and v.name.lower() == raw.strip().lower()]
+    lv = levels_for(db, user, rows, ViewAcl)
+    rows = [v for v in rows if v.id in lv and _resources_ok(db, v)]
+    if len(rows) > 1:
+        raise ToolError("AMBIGUOUS: several views have that name; use the id from list_views")
+    return rows[0] if rows else None
+
+
 def _view(db: Session, user: User, raw) -> View:
     try:
         v = db.get(View, uuid.UUID(str(raw)))
     except ValueError:
-        v = None
+        v = _view_by_name(db, user, raw)
     # Same answer for "does not exist", "not allowed for the assistant" and "no access": nothing is revealed.
     if v is None or not v.llm_allowed or not _resources_ok(db, v) or v.id not in levels_for(db, user, [v], ViewAcl):
         raise ToolError("NOT_FOUND: unknown view_id; call list_views")
@@ -154,15 +179,117 @@ def _check(args: dict, allowed: set[str]) -> None:
         raise ToolError(f"VALIDATION: unknown arguments {extra}")
 
 
-def list_resources(db, user, cfg, args):
-    _check(args, {"tag", "type"})
+def _visible_resources(db: Session, user: User, args: dict) -> list[Resource]:
+    """Resources the administrator allowed for Sensei AND the user can see, optionally by type or tag."""
     rows = [r for r in db.scalars(select(Resource).order_by(Resource.name)) if r.llm_allowed
             and (not args.get("type") or r.type == args["type"])
             and (not args.get("tag") or args["tag"] in (r.tags or []))]
     lv = levels_for(db, user, rows, ResourceAcl)
-    seen = [r for r in rows if r.id in lv]
+    return [r for r in rows if r.id in lv]
+
+
+def list_resources(db, user, cfg, args):
+    _check(args, {"tag", "type"})
+    seen = _visible_resources(db, user, args)
     return ([{"id": str(r.id), "name": r.name, "type": r.type, "status": r.status} for r in seen],
             [{"type": "resource", "id": str(r.id), "name": r.name} for r in seen])
+
+
+def _tally(rs: list[Resource]) -> dict:
+    c = Counter(r.status for r in rs)
+    return {"total": len(rs), "up": c["up"], "down": c["down"], "not_checked": len(rs) - c["up"] - c["down"]}
+
+
+def get_resource_counts(db, user, cfg, args):
+    _check(args, {"tag", "type"})
+    if args.get("type") and args["type"] not in RESOURCE_TYPES:
+        raise ToolError(f"VALIDATION: type must be one of {RESOURCE_TYPES}, or omit it")
+    seen = _visible_resources(db, user, args)
+    down = [r for r in seen if r.status == "down"]
+    out = {"overall": _tally(seen), "by_type": {t: _tally([r for r in seen if r.type == t]) for t in sorted({r.type for r in seen})},
+           "down": [{"name": r.name, "type": r.type, "error": _cell(r.last_error or "")} for r in down[:20]]}
+    if len(down) > 20:
+        out["note"] = f"Showing 20 of {len(down)} that are down."
+    if not seen:
+        out["note"] = "No servers are available to the assistant. An administrator allows each one under Inventory."
+    return out, [{"type": "resource", "id": str(r.id), "name": r.name} for r in down[:20]]
+
+
+def _dashboards(db: Session, user: User) -> list[Dashboard]:
+    rows = list(db.scalars(select(Dashboard).order_by(Dashboard.name)))
+    lv = levels_for(db, user, rows, DashboardAcl)
+    return [d for d in rows if d.id in lv]
+
+
+def _widgets(db: Session, d: Dashboard) -> list[DashboardWidget]:
+    return list(db.scalars(select(DashboardWidget).where(DashboardWidget.dashboard_id == d.id).order_by(DashboardWidget.created_at)))
+
+
+def _widget_view(db: Session, user: User, w: DashboardWidget) -> View | None:
+    try:
+        return _view(db, user, w.view_id)
+    except ToolError:
+        return None  # not allowed for the assistant, or not visible to this user
+
+
+def list_dashboards(db, user, cfg, args):
+    _check(args, set())
+    out = []
+    for d in _dashboards(db, user):
+        ws = _widgets(db, d)
+        out.append({"id": str(d.id), "name": d.name, "description": d.description, "widgets": len(ws),
+                    "available_to_assistant": sum(1 for w in ws if _widget_view(db, user, w))})
+    return out, [{"type": "dashboard", "id": o["id"], "name": o["name"]} for o in out]
+
+
+def _find_dashboard(db: Session, user: User, raw) -> Dashboard:
+    if not isinstance(raw, str) or not raw.strip():
+        raise ToolError("VALIDATION: dashboard must be a name or id; call list_dashboards")
+    q, seen = raw.strip().lower(), _dashboards(db, user)
+    found = [d for d in seen if str(d.id) == q or d.name.lower() == q] or [d for d in seen if q in d.name.lower()]
+    if len(found) == 1:
+        return found[0]
+    if not found:
+        raise ToolError("NOT_FOUND: no dashboard with that name; call list_dashboards")
+    raise ToolError("AMBIGUOUS: several dashboards match: " + ", ".join(sorted(d.name for d in found)))
+
+
+def summarize_dashboard(db, user, cfg, args):
+    _check(args, {"dashboard", "refresh"})
+    refresh = args.get("refresh", False)
+    if not isinstance(refresh, bool):
+        raise ToolError("VALIDATION: refresh must be true or false")
+    d = _find_dashboard(db, user, args.get("dashboard"))
+    widgets = _widgets(db, d)
+    shown, usable, hidden = widgets[:MAX_DASHBOARD_WIDGETS], [], 0
+    for w in shown:
+        v = _widget_view(db, user, w)
+        if v:
+            usable.append((w, v))
+        else:
+            hidden += 1
+    per = max(600, cfg["max_chars"] // max(1, len(usable)))
+    out, sources = [], [{"type": "dashboard", "id": str(d.id), "name": d.name}]
+    for w, v in usable:
+        entry = {"title": w.title or v.name, "view": v.name, "type": v.type}
+        try:
+            res = engine.latest_result(db, user, v, w.params)
+            if res is None and refresh:
+                res = engine.run_view(db, user, v, w.params, triggered_by="llm")
+        except AppError as e:
+            entry["error"] = str(_app_error(e))
+            res = None
+        if res is not None:
+            entry.update(reduce(res, min(5, cfg["max_rows"]), per))
+        elif "error" not in entry:
+            entry["note"] = "no stored result yet; ask to refresh it"
+        out.append(entry)
+        sources.append(_source(v))
+    result = {"dashboard": d.name, "description": d.description, "widget_count": len(widgets), "widgets": out,
+              "not_available_to_assistant": hidden}
+    if len(widgets) > len(shown):
+        result["note"] = f"Showing the first {len(shown)} of {len(widgets)} widgets."
+    return result, sources
 
 
 def list_views(db, user, cfg, args):
@@ -245,7 +372,8 @@ def query_view_table(db, user, cfg, args):
     return out, [_source(v)]
 
 
-HANDLERS = {"list_resources": list_resources, "list_views": list_views, "run_view": run_view,
+HANDLERS = {"list_resources": list_resources, "get_resource_counts": get_resource_counts, "list_views": list_views,
+            "run_view": run_view, "list_dashboards": list_dashboards, "summarize_dashboard": summarize_dashboard,
             "get_view_summary": get_view_summary, "query_view_table": query_view_table}
 
 

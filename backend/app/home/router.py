@@ -38,7 +38,11 @@ def summary(ctx: Ctx = Depends(current_ctx), db: Session = Depends(get_db)):
         failed = len(list(db.scalars(select(ViewRun.id).where(
             ViewRun.view_id.in_(ids), ViewRun.status == "error", ViewRun.started_at >= now() - timedelta(hours=24)))))
     dashboards = list(db.scalars(select(Dashboard)))
+    by_type: dict[str, Counter] = defaultdict(Counter)
+    for r in res:
+        by_type[r.type][r.status] += 1
     return {"resources": dict(Counter(r.status for r in res)), "views": len(views), "failed_runs_24h": failed,
+            "by_type": {t: dict(c) for t, c in by_type.items()},
             "dashboards": len(levels_for(db, ctx.user, dashboards, DashboardAcl))}
 
 

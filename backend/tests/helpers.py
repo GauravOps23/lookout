@@ -50,15 +50,30 @@ class FakeHttp:
         return self.status, self.body
 
 
+class FakeOcp:
+    def __init__(self):
+        self.fail, self.json, self.calls = None, {}, []
+
+    def ping(self, h):
+        if self.fail:
+            raise self.fail
+
+    def get_json(self, h, path, query=None):
+        self.calls.append((h.name, path, query))
+        if self.fail:
+            raise self.fail
+        return self.json.get(path, {"items": []})
+
+
 @pytest.fixture()
 def fakes(db):
     from app.resources import service
 
     service.reset_vault()
     saved = dict(service.CONNECTORS)
-    service.CONNECTORS.update(oracle=FakeOracle(), ssh=FakeSsh(), api=FakeHttp())
+    service.CONNECTORS.update(oracle=FakeOracle(), ssh=FakeSsh(), api=FakeHttp(), ocp=FakeOcp())
     yield type("F", (), {"oracle": service.CONNECTORS["oracle"], "ssh": service.CONNECTORS["ssh"],
-                         "http": service.CONNECTORS["api"]})
+                         "http": service.CONNECTORS["api"], "ocp": service.CONNECTORS["ocp"]})
     service.CONNECTORS.update(saved)
 
 

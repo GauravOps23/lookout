@@ -1,4 +1,5 @@
 """Per-type resource config and secret schemas (spec 6.2). Unknown fields are rejected."""
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, TypeAdapter, model_validator
@@ -64,8 +65,30 @@ class ApiSecret(_S):
     api_key: str | None = None
 
 
+class OcpConfig(_S):
+    """An OpenShift/Kubernetes cluster, read through its REST API with a service-account token."""
+    api_url: str  # e.g. https://api.cluster.example:6443
+    namespaces: list[str] = Field([], max_length=50)  # empty = all; set it when the token cannot list cluster-wide
+    timeout_s: int = Field(15, ge=1, le=120)
+    verify_tls: bool = True
+
+    @model_validator(mode="after")
+    def _url(self):
+        TypeAdapter(HttpUrl).validate_python(self.api_url)
+        if not self.api_url.startswith(("http://", "https://")):
+            raise ValueError("api_url must be http(s)")
+        if any(len(n) > 63 or not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", n) for n in self.namespaces):
+            raise ValueError("invalid namespace name")
+        return self
+
+
+class OcpSecret(_S):
+    token: str = Field(min_length=1)
+
+
 TYPES = {
     "ssh": (SshConfig, SshSecret, "inventory.ssh.create"),
     "oracle": (OracleConfig, OracleSecret, "inventory.oracle.create"),
     "api": (ApiConfig, ApiSecret, "inventory.api.create"),
+    "ocp": (OcpConfig, OcpSecret, "inventory.ocp.create"),
 }

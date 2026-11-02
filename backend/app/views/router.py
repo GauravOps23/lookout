@@ -12,14 +12,13 @@ from app.audit.service import record
 from app.authz.access import levels_for, require_level
 from app.authz.acl import Level
 from app.authz.permissions import has_capability
-from app.db import get_db
+from app.db import as_utc, get_db
 from app.deps import Ctx, current_ctx
 from app.errors import AppError
-from app.models import Dashboard, DashboardWidget, Group, Resource, ResourceAcl, User, View, ViewAcl
+from app.models import Dashboard, DashboardWidget, Group, Resource, ResourceAcl, User, View, ViewAcl, ViewRun
 from app.resources.router import AclIn
 from app.views import engine
 from app.views.base import has_unsatisfied_required
-from app.views.db_table.plugin import DAILY_ERRORS_SQL
 from app.views.registry import REGISTRY
 
 router = APIRouter(prefix="/api", tags=["views"])
@@ -147,13 +146,6 @@ def view_types(ctx: Ctx = Depends(current_ctx), db: Session = Depends(get_db)):
              "config_schema": p.config_schema.model_json_schema()} for p in REGISTRY.values()]
 
 
-@router.get("/view-templates")
-def view_templates(ctx: Ctx = Depends(current_ctx)):
-    return [{"name": "Daily errors", "type": "db_table", "cache_ttl_s": 300,
-             "description": "Today's failed requests (req_status 8/9) grouped by system, user and message",
-             "config": {"mode": "sql", "sql": DAILY_ERRORS_SQL}}]
-
-
 @router.get("/views")
 def list_views(type: str | None = None, ctx: Ctx = Depends(current_ctx), db: Session = Depends(get_db)):
     stmt = select(View).order_by(View.name)
@@ -258,6 +250,37 @@ def run(vid: uuid.UUID, body: RunIn = RunIn(), fresh: bool = Query(False), ctx: 
         record(db, "view.run", actor_id=ctx.user.id, target_type="view", target_id=vid, ip=ctx.ip,
                detail={"param_names": sorted(body.params)})  # names only: values may be sensitive
     return result
+
+
+@router.get("/views/{vid}/rows")
+def rows(vid: uuid.UUID, page: int = Query(1, ge=1), size: int = Query(50, ge=1, le=200), run_id: uuid.UUID | None = None,
+         params: str | None = None, fresh: bool = Query(False), ctx: Ctx = Depends(current_ctx),
+         db: Session = Depends(get_db)):
+    """One page of a view's result. Without `run_id` this runs the view (or reuses a fresh cached run) and
+    returns its `meta.run_id`; pass that back to page through the same stored run without querying again."""
+    v = db.get(View, vid)
+    if v is None:
+        raise AppError("NOT_FOUND", "Not found")
+    if run_id is None:
+        try:
+            p = json.loads(params) if params else {}
+        except ValueError:
+            raise AppError("VALIDATION", "params must be JSON") from None
+        res = engine.run_view(db, ctx.user, v, p, fresh=fresh, triggered_by="user")
+        run_id = uuid.UUID(res["meta"]["run_id"])
+        if not res["meta"].get("cached"):  # audit real runs; a cache hit is just a read
+            record(db, "view.run", actor_id=ctx.user.id, target_type="view", target_id=vid, ip=ctx.ip,
+                   detail={"param_names": sorted(p)})  # names only: values may be sensitive
+    else:
+        require_level(db, ctx.user, v, ViewAcl, Level.view)  # reading a stored result needs view access (spec 4.2)
+    run = db.get(ViewRun, run_id)
+    if run is None or run.view_id != v.id or run.result is None or run.status == "error":
+        raise AppError("NOT_FOUND", "That result has expired. Run the view again.")
+    all_rows = engine.rows_of(run)
+    start = (page - 1) * size
+    meta = {**run.result["meta"], "run_id": str(run.id), "generated_at": as_utc(run.started_at).isoformat()}
+    return {"columns": run.result["columns"], "rows": all_rows[start:start + size], "page": page, "size": size,
+            "total_rows": len(all_rows), "pages": max(1, -(-len(all_rows) // size)), "meta": meta}
 
 
 @router.get("/views/{vid}/result")

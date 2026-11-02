@@ -43,7 +43,7 @@ class DbTableConfig(BaseModel):
     columns: list[str] = []
     filters: list[Filter] = []
     params: list[Variable] = []
-    row_limit: int = Field(10000, ge=1, le=10000)
+    row_limit: int = Field(100000, ge=1, le=100000)
     timeout_s: int = Field(30, ge=1, le=600)
 
     @model_validator(mode="after")

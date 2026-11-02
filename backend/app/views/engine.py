@@ -3,15 +3,17 @@
 DB access happens only on the calling thread; worker threads get pre-built Handles and run connectors.
 """
 import copy
+import gzip
 import hashlib
 import json
 import threading
 import uuid
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.authz.access import require_level
@@ -21,11 +23,11 @@ from app.errors import AppError
 from app.models import Resource, ResourceAcl, User, View, ViewAcl, ViewRun
 from app.resources import service
 from app.resources.connectors.base import ConnectorError, Handle, sanitize
-from app.views.base import RunContext, bind_params, merge_results
+from app.views.base import PREVIEW_ROWS, RunContext, bind_params, merge_results
 from app.views.registry import REGISTRY
 
 GLOBAL_SLOTS = threading.BoundedSemaphore(20)
-PER_RESOURCE = {"oracle": 2, "ssh": 4, "api": 4}
+PER_RESOURCE = {"oracle": 2, "ssh": 4, "api": 4, "ocp": 4}
 FANOUT_WORKERS = 8
 
 _guard = threading.Lock()
@@ -101,8 +103,51 @@ def cached(db: Session, view: View, phash: str, ttl_s: int | None) -> tuple[dict
         return None
     res = copy.deepcopy(run.result)
     age = (now() - as_utc(run.started_at)).total_seconds()
-    res["meta"].update(cached=True, generated_at=as_utc(run.started_at).isoformat(), stale=age > view.cache_ttl_s)
+    res["meta"].update(cached=True, generated_at=as_utc(run.started_at).isoformat(), stale=age > view.cache_ttl_s,
+                       run_id=str(run.id))
     return res, run
+
+
+def _pack(result: dict) -> bytes | None:
+    """Keep only a preview of a big result in the run record; the full rows go to a compressed blob for paging."""
+    rows = result["rows"]
+    if len(rows) <= PREVIEW_ROWS:
+        return None
+    result["rows"] = rows[:PREVIEW_ROWS]
+    result["meta"]["preview_only"] = True  # row_count stays the full total
+    return gzip.compress(json.dumps(rows, default=str).encode(), 3)
+
+
+def _record(db: Session, run: ViewRun, result: dict | None) -> None:
+    """Persist a run; only the latest successful run per view+params keeps its full-rows blob."""
+    db.add(run)
+    db.flush()
+    if result is not None:
+        db.execute(update(ViewRun).where(ViewRun.view_id == run.view_id, ViewRun.params_hash == run.params_hash,
+                                         ViewRun.id != run.id, ViewRun.rows_blob.is_not(None)).values(rows_blob=None))
+    rid = str(run.id)
+    db.commit()
+    if result is not None:
+        result["meta"]["run_id"] = rid
+
+
+_rows_cache: OrderedDict[str, list] = OrderedDict()
+_rows_guard = threading.Lock()
+
+
+def rows_of(run: ViewRun) -> list:
+    """Every row of a stored run (decompressed once, then kept for the next page request)."""
+    key = str(run.id)
+    with _rows_guard:
+        if key in _rows_cache:
+            _rows_cache.move_to_end(key)
+            return _rows_cache[key]
+    rows = json.loads(gzip.decompress(run.rows_blob)) if run.rows_blob else (run.result or {}).get("rows", [])
+    with _rows_guard:
+        _rows_cache[key] = rows
+        while len(_rows_cache) > 2:  # a full 100k-row result is tens of MB in memory
+            _rows_cache.popitem(last=False)
+    return rows
 
 
 def _run_one(plugin, cfg, ctx: RunContext, h: Handle):
@@ -116,7 +161,8 @@ def execute(db: Session, view: View, resources: list[Resource], typed: dict, tri
         if r.type != plugin.source_kind:
             raise AppError("VALIDATION", f"{view.type} views need {plugin.source_kind} resources")
     handles = [service.handle(r) for r in resources]
-    ctx = RunContext(params=typed, meta={"connectors": {"api": service.connector_for(db, "api")}})
+    ctx = RunContext(params=typed, meta={"connectors": {"api": service.connector_for(db, "api"),
+                                                        "ocp": service.connector_for(db, "ocp")}})
     t0, started = time.monotonic(), now()
 
     def work(h: Handle):
@@ -150,11 +196,11 @@ def execute(db: Session, view: View, resources: list[Resource], typed: dict, tri
         result["meta"].update(sources=sources, cached=False, stale=False, generated_at=started.isoformat(),
                               duration_ms=int((time.monotonic() - t0) * 1000))
         msg = "; ".join(errors)
-    db.add(ViewRun(view_id=view.id, params_hash=params_hash(typed), started_at=started,
-                   duration_ms=int((time.monotonic() - t0) * 1000), status=status, error=msg,
-                   row_count=result["meta"]["row_count"] if result else 0, result=result,
-                   triggered_by=triggered_by))
-    db.commit()
+    blob = _pack(result) if result else None
+    _record(db, ViewRun(view_id=view.id, params_hash=params_hash(typed), started_at=started,
+                        duration_ms=int((time.monotonic() - t0) * 1000), status=status, error=msg,
+                        row_count=result["meta"]["row_count"] if result else 0, result=result, rows_blob=blob,
+                        triggered_by=triggered_by), result)
     if result is None:
         raise AppError("UPSTREAM_ERROR", msg or "Run failed", {"sources": sources})
     return result
@@ -199,9 +245,10 @@ def execute_derived(db: Session, user: User, view: View, plugin, cfg, triggered_
     ms = int((time.monotonic() - t0) * 1000)
     result["meta"].update(cached=False, stale=False, generated_at=started.isoformat(), duration_ms=ms,
                           sources=[{"view_id": str(i)} for i in plugin.source_view_ids(cfg)])
-    db.add(ViewRun(view_id=view.id, params_hash=params_hash({}), started_at=started, duration_ms=ms,
-                   status="ok", row_count=result["meta"]["row_count"], result=result, triggered_by=triggered_by))
-    db.commit()
+    blob = _pack(result)
+    _record(db, ViewRun(view_id=view.id, params_hash=params_hash({}), started_at=started, duration_ms=ms,
+                        status="ok", row_count=result["meta"]["row_count"], result=result, rows_blob=blob,
+                        triggered_by=triggered_by), result)
     return result
 
 

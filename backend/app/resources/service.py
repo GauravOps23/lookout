@@ -7,12 +7,14 @@ from app.db import now
 from app.models import Resource, Setting
 from app.resources.connectors.base import ConnectorError, Handle, sanitize
 from app.resources.connectors.http import HttpConnector
+from app.resources.connectors.ocp import OcpConnector
 from app.resources.connectors.oracle import OracleConnector
 from app.resources.connectors.ssh import SshConnector
 from app.secrets.vault import Vault
 
 # Replaceable in tests. HttpConnector gets the admin SSRF allow-list at use time (see connector_for).
-CONNECTORS: dict = {"oracle": OracleConnector(), "ssh": SshConnector(), "api": None}
+CONNECTORS: dict = {"oracle": OracleConnector(), "ssh": SshConnector(), "api": None, "ocp": None}
+_NEEDS_ALLOWLIST = {"api": HttpConnector, "ocp": OcpConnector}
 
 _vault: Vault | None = None
 
@@ -47,7 +49,7 @@ def ssrf_allowlist(db: Session) -> list[str]:
 
 def connector_for(db: Session, rtype: str):
     c = CONNECTORS[rtype]
-    return c if c is not None else HttpConnector(ssrf_allowlist(db))
+    return c if c is not None else _NEEDS_ALLOWLIST[rtype](ssrf_allowlist(db))
 
 
 def handle(resource: Resource) -> Handle:

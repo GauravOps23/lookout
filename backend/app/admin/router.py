@@ -7,7 +7,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.audit.service import record
@@ -17,7 +17,9 @@ from app.authz.permissions import CATALOG, SCOPED
 from app.db import get_db
 from app.deps import Ctx, require
 from app.errors import AppError
-from app.models import AuditLog, Group, GroupPermission, Setting, User, UserGroup, UserPermission
+from app.models import (AuditLog, Dashboard, DashboardAcl, Group, GroupPermission, LinkTile, LinkUserCredential,
+                        LlmConversation, LlmMessage, Resource, ResourceAcl, Setting, User, UserGroup, UserPermission,
+                        View, ViewAcl)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -41,6 +43,11 @@ class UserPatch(Strict):
 class GroupIn(Strict):
     name: str = Field(min_length=1, max_length=128)
     description: str = ""
+
+
+class GroupPatch(Strict):
+    name: str | None = Field(None, min_length=1, max_length=128)
+    description: str | None = None
 
 
 class MembersIn(Strict):
@@ -99,6 +106,12 @@ def create_user(body: UserCreate, ctx: Ctx = Depends(require("admin.users")), db
     return {**_user(u), "temp_password": temp}  # shown once
 
 
+def _is_last_admin(db: Session, u: User) -> bool:
+    """True when `u` is an active administrator and no other active administrator exists."""
+    return u.is_admin and u.is_active and not db.scalar(
+        select(User.id).where(User.is_admin.is_(True), User.is_active.is_(True), User.id != u.id))
+
+
 @router.patch("/users/{user_id}")
 def patch_user(user_id: uuid.UUID, body: UserPatch, ctx: Ctx = Depends(require("admin.users")),
                db: Session = Depends(get_db)):
@@ -106,6 +119,8 @@ def patch_user(user_id: uuid.UUID, body: UserPatch, ctx: Ctx = Depends(require("
     changes = body.model_dump(exclude_unset=True)
     if u.id == ctx.user.id and (changes.get("is_active") is False or changes.get("is_admin") is False):
         raise AppError("CONFLICT", "You cannot deactivate or demote yourself")
+    if (changes.get("is_active") is False or changes.get("is_admin") is False) and _is_last_admin(db, u):
+        raise AppError("CONFLICT", "There must be at least one active administrator")
     for k, v in changes.items():
         setattr(u, k, v)
     db.commit()
@@ -114,6 +129,33 @@ def patch_user(user_id: uuid.UUID, body: UserPatch, ctx: Ctx = Depends(require("
     record(db, "user.update", actor_id=ctx.user.id, target_type="user", target_id=u.id, ip=ctx.ip,
            detail=changes)
     return _user(u)
+
+
+@router.delete("/users/{user_id}", status_code=204)
+def delete_user(user_id: uuid.UUID, ctx: Ctx = Depends(require("admin.users")), db: Session = Depends(get_db)):
+    u = _get(db, User, user_id)
+    if u.id == ctx.user.id:
+        raise AppError("CONFLICT", "You cannot delete yourself")
+    if _is_last_admin(db, u):
+        raise AppError("CONFLICT", "You cannot delete the last active administrator")
+    owned = {name: db.scalar(select(func.count()).select_from(m).where(m.owner_id == u.id))
+             for name, m in (("connections", Resource), ("views", View), ("dashboards", Dashboard), ("links", LinkTile))}
+    owned = {k: n for k, n in owned.items() if n}
+    if owned:
+        raise AppError("CONFLICT", "This user still owns " + ", ".join(f"{n} {k}" for k, n in owned.items())
+                       + ". Delete or reassign those first, or deactivate the user instead.")
+    login = u.login
+    destroy_user_sessions(db, u.id)
+    convs = select(LlmConversation.id).where(LlmConversation.user_id == u.id)
+    db.execute(delete(LlmMessage).where(LlmMessage.conversation_id.in_(convs)))
+    for m in (LlmConversation, LinkUserCredential, UserPermission, UserGroup):
+        db.execute(delete(m).where(m.user_id == u.id))
+    for m in (ResourceAcl, ViewAcl, DashboardAcl):
+        db.execute(delete(m).where(m.principal_type == "user", m.principal_id == u.id))
+    db.delete(u)
+    db.commit()
+    record(db, "user.delete", actor_id=ctx.user.id, target_type="user", target_id=user_id, ip=ctx.ip,
+           detail={"login": login})
 
 
 @router.post("/users/{user_id}/reset-password")
@@ -169,6 +211,22 @@ def create_group(body: GroupIn, ctx: Ctx = Depends(require("admin.groups")), db:
     record(db, "group.create", actor_id=ctx.user.id, target_type="group", target_id=g.id, ip=ctx.ip,
            detail={"name": g.name})
     return {"id": str(g.id), "name": g.name, "description": g.description, "members": []}
+
+
+@router.patch("/groups/{group_id}")
+def update_group(group_id: uuid.UUID, body: GroupPatch, ctx: Ctx = Depends(require("admin.groups")),
+                 db: Session = Depends(get_db)):
+    g = _get(db, Group, group_id)
+    if body.name is not None and body.name != g.name:
+        if db.scalar(select(Group).where(Group.name == body.name)):
+            raise AppError("CONFLICT", "Group name already exists")
+        g.name = body.name
+    if body.description is not None:
+        g.description = body.description
+    db.commit()
+    record(db, "group.update", actor_id=ctx.user.id, target_type="group", target_id=g.id, ip=ctx.ip,
+           detail={"name": g.name})
+    return {"id": str(g.id), "name": g.name, "description": g.description, "members": [str(u.id) for u in g.users]}
 
 
 @router.delete("/groups/{group_id}", status_code=204)

@@ -99,7 +99,7 @@ def test_tool_loop_runs_view_as_user_and_cites_sources(admin, llm, fakes, db):
     assert ev[3][1] == [{"type": "view", "id": vid, "name": "Daily"}]
     tool_msg = llm.sent[1]["messages"][-1]
     assert tool_msg["role"] == "tool" and tool_msg["content"].startswith('<tool_result untrusted="true">')
-    assert llm.sent[0]["key"] == "sk-1" and len(llm.sent[0]["tools"]) == 5
+    assert llm.sent[0]["key"] == "sk-1" and len(llm.sent[0]["tools"]) == 8
     assert "Never ask for" in llm.sent[0]["messages"][0]["content"]
     audit = db.scalars(select(LlmAudit)).all()
     assert [(a.tool, a.status) for a in audit] == [("run_view", "ok")]

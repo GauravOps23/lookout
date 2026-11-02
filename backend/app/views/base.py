@@ -9,7 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.errors import AppError
 from app.resources.connectors.base import Handle
 
-MAX_ROWS = 10000
+MAX_ROWS = 100000      # hard cap on one result; larger results are cut and flagged truncated
+PREVIEW_ROWS = 10000   # rows kept in the stored run record; the rest live in ViewRun.rows_blob for paging
 COLUMN_TYPES = ("string", "number", "boolean", "datetime", "json")
 
 

@@ -17,6 +17,7 @@ from app.errors import AppError, install_handlers
 from app.home.router import router as home_router
 from app.links.router import router as links_router
 from app.llm.router import admin_router as llm_admin_router, router as llm_router
+from app.monitor.router import router as monitor_router
 from app.resources.router import router as resources_router
 from app.views.router import router as views_router
 
@@ -54,7 +55,7 @@ def create_app() -> FastAPI:
         return {"status": "ready"}
 
     for r in (auth_router, admin_router, backup_router, resources_router, views_router,
-              dashboards_router, links_router, home_router, llm_admin_router, llm_router):
+              dashboards_router, links_router, home_router, monitor_router, llm_admin_router, llm_router):
         app.include_router(r)
     app.mount("/", StaticFiles(directory=Path(__file__).parent / "static", html=True))  # last: API routes win
     return app
